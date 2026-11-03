@@ -1,0 +1,135 @@
+# 10. PDE management, help, status and diagnostics
+# ---------------------------------------------------------------------------
+function global:Get-PDEStatus {
+    [CmdletBinding()]
+    param()
+
+    $readLineModule = Get-Module PSReadLine | Select-Object -First 1
+    [pscustomobject]@{
+        PDEVersion          = $global:PDE_State.Version
+        PowerShellVersion   = $PSVersionTable.PSVersion.ToString()
+        PSReadLineVersion   = if ($readLineModule) { $readLineModule.Version.ToString() } else { 'Unknown' }
+        IndexedCommands     = $global:PDE_State.CommandNames.Count
+        IndexedPrefixes     = $global:PDE_State.CommandPrefixes.Count
+        IndexedHistory      = $global:PDE_State.History.Count
+        LiveCommandHighlighting = [bool]$global:PDE_State.LiveHighlightingEnabled
+        CommandHighlightMode = 'AST three-colour; safe single-line ASCII'
+        PredictionsEnabled  = $global:PDE_State.PredictionAvailable
+        PredictionViewStyle = $global:PDE_State.PredictionViewStyleEffective
+        ConfiguredPredictionViewStyle = $global:PDE_Config.PredictionViewStyle
+        PredictionStatus    = $global:PDE_State.PredictionReason
+        LastIndexUpdate     = $global:PDE_State.LastIndexUpdate
+        LastHistoryUpdate   = $global:PDE_State.LastHistoryUpdate
+        DiagnosticsLogging  = [bool]$global:PDE_Config.EnableDiagnosticsLog
+        LastError           = $global:PDE_State.LastError
+    }
+}
+
+function global:Get-PDEStatistics {
+    [CmdletBinding()]
+    param()
+
+    Update-PDEHistory | Out-Null
+    Update-PDEIndex | Out-Null
+
+    [pscustomobject]@{
+        CommandNames       = $global:PDE_State.CommandNames.Count
+        CommandPrefixes    = $global:PDE_State.CommandPrefixes.Count
+        HistoryEntries     = $global:PDE_State.History.Count
+        MaximumHistory     = $global:PDE_Config.HistoryIndexLimit
+        PredictionEnabled  = $global:PDE_State.PredictionAvailable
+        LastIndexUpdate    = $global:PDE_State.LastIndexUpdate
+        LastHistoryUpdate  = $global:PDE_State.LastHistoryUpdate
+    }
+}
+
+function global:Get-PDEDiagnostics {
+    [CmdletBinding()]
+    param()
+
+    $module = Get-Module PSReadLine | Select-Object -First 1
+    $historyPath = $null
+    try { $historyPath = (Get-PSReadLineOption).HistorySavePath } catch { }
+    $bufferWidth = $null
+    try { $bufferWidth = [Console]::BufferWidth } catch { }
+
+    [pscustomobject]@{
+        ComputerName       = $env:COMPUTERNAME
+        HostName           = $Host.Name
+        PowerShellVersion  = $PSVersionTable.PSVersion.ToString()
+        Edition            = if ($PSVersionTable.ContainsKey('PSEdition')) { $PSVersionTable.PSEdition } else { 'Desktop' }
+        OperatingSystem    = [Environment]::OSVersion.VersionString
+        PSReadLineVersion  = if ($module) { $module.Version.ToString() } else { 'Not loaded' }
+        PSReadLinePath     = if ($module) { $module.Path } else { $null }
+        HistoryPath        = $historyPath
+        ConsoleBufferWidth = $bufferWidth
+        PredictionSupport  = $global:PDE_State.PredictionReason
+        DiagnosticsLogPath = $global:PDE_Config.DiagnosticsLogPath
+    }
+}
+
+function global:Get-PDEHelp {
+    [CmdletBinding()]
+    param([Parameter(Mandatory, Position=0)][string]$Name)
+
+    Get-Help -Name $Name -Full
+}
+
+function global:Test-PDE {
+    [CmdletBinding()]
+    param()
+
+    Update-PDEIndex -Force | Out-Null
+    Update-PDEHistory | Out-Null
+
+    $checks = [System.Collections.Generic.List[object]]::new()
+    $checks.Add([pscustomobject]@{
+        Test = 'PSReadLine module'
+        Passed = [bool](Get-Module PSReadLine)
+        Details = if (Get-Module PSReadLine) { 'Module loaded.' } else { 'Module is not loaded.' }
+    })
+
+    $checks.Add([pscustomobject]@{
+        Test = 'Command index'
+        Passed = ($global:PDE_State.CommandNames.Count -gt 0)
+        Details = "Indexed $($global:PDE_State.CommandNames.Count) command names."
+    })
+
+    $sample = Get-PDECommandAnalysis -Text 'Get-Date | Where-Object { $_ }'
+    $astPassed = $sample.IsSyntacticallyValid -and $sample.Commands.Count -ge 2
+    $checks.Add([pscustomobject]@{
+        Test = 'PowerShell AST parsing'
+        Passed = $astPassed
+        Details = "Parser found $($sample.Commands.Count) command AST node(s)."
+    })
+
+    $invalidHighlight = Get-PDEInputHighlightClass -Text 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    $checks.Add([pscustomobject]@{
+        Test = 'Unknown command is red (not green)'
+        Passed = ($invalidHighlight -eq 'Red')
+        Details = "A long non-command token is classified as $invalidHighlight."
+    })
+
+    $getDateKnown = $global:PDE_State.CommandNames.Contains('Get-Date')
+    $checks.Add([pscustomobject]@{
+        Test = 'Command recognition'
+        Passed = $getDateKnown
+        Details = if ($getDateKnown) { 'Get-Date is present in the command index.' } else { 'Get-Date was not found in the current session.' }
+    })
+
+    $checks.Add([pscustomobject]@{
+        Test = 'Predictive IntelliSense'
+        Passed = $global:PDE_State.PredictionAvailable
+        Details = $global:PDE_State.PredictionReason
+    })
+
+    $checks | Format-Table -AutoSize | Out-Host
+    [pscustomobject]@{
+        Passed = (@($checks | Where-Object { -not $_.Passed }).Count -eq 0)
+        PassedCount = @($checks | Where-Object { $_.Passed }).Count
+        FailedCount = @($checks | Where-Object { -not $_.Passed }).Count
+        Checks = @($checks)
+    }
+}
+
+# ---------------------------------------------------------------------------
