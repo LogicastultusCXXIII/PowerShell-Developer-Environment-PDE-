@@ -1,857 +1,653 @@
 # PowerShell Developer Environment (PDE)
 
-## Command Intelligence 3.1.2 — Technical Documentation & User Guide
+**User guide for PDE 4.3.0-rc1 — live per-character command colours**
 
-A modular PowerShell command-intelligence component providing command discovery, history-backed suggestions, AST-based analysis, character-level green/yellow/red command highlighting, and PSReadLine integration.
+PDE adds command recognition, live green/orange/red/gray colouring, command suggestions, syntax analysis and session-based success learning to a PowerShell console.
 
-> **Documentation scope**  
-> This README covers the complete Command Intelligence component: its main loader and all nine feature files. It describes the refactored versions of `PDE-Logging.ps1`, `PDE-History-Index.ps1`, and `PDE-Live-Highlighting.ps1`, together with the compatible `PDE-Management-Diagnostics.ps1` update. The other five feature files remain part of the same nine-file component.
+This release uses a bundled editor derived from PSReadLine 2.3.6. Its renderer applies command colours while you type and handles the editing buffer, cursor and redraw together.
 
-| Document detail | Value |
+The compact release contains 13 files. On Linux PowerShell 7.4.6, 56 automated checks and 20 dedicated colour checks passed. Five Windows or interactive checks were skipped. Both editor DLLs compiled successfully. Windows installation and on-screen rendering still need local verification.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Requirements](#requirements)
+- [Installation and portable use](#installation-and-portable-use)
+- [How the colours work](#how-the-colours-work)
+- [Everyday commands](#everyday-commands)
+- [Suggestions and syntax checking](#suggestions-and-syntax-checking)
+- [History: view, clear and stop saving](#history-view-clear-and-stop-saving)
+- [Configuration](#configuration)
+- [Keyboard controls and custom shortcuts](#keyboard-controls-and-custom-shortcuts)
+- [Testing](#testing)
+- [Troubleshooting](#troubleshooting)
+- [Upgrading and uninstalling](#upgrading-and-uninstalling)
+- [Where to edit the colouring system](#where-to-edit-the-colouring-system)
+- [Project files](#project-files)
+- [Known limitations and privacy](#known-limitations-and-privacy)
+
+## Quick start
+
+1. Extract **all** release files into one folder.
+2. Close existing PDE PowerShell windows before upgrading.
+3. Double-click **`Install-PDE.cmd`**.
+4. Read the edition-specific installation results.
+5. Open a **fresh PowerShell console**.
+6. Check:
+
+```powershell
+Get-PDEStatus | Format-List
+```
+
+Look for:
+
+| Field | Expected result |
 |---|---|
-| Environment | PowerShell Developer Environment (PDE V2) |
-| Component | PDE Command Intelligence |
-| Component version | 3.1.2 |
-| Target shells | Windows PowerShell 5.1 and PowerShell 7+ (designed for; test each host) |
-| Primary dependency | PSReadLine |
-| Architecture | Main loader plus nine dot-sourced feature scripts |
-| Main implementation languages | PowerShell and inline C# helper for live character alignment |
-| Main capabilities | Command indexing, history indexing, fuzzy suggestions, AST analysis, live highlighting, PSReadLine configuration and diagnostics |
-| Validation status | Earlier pre-optimisation build passed its reported tests. The later C#-optimised replacement set must be re-tested in the target Windows PowerShell session before it is described as fully validated. |
+| `Version` | `4.3.0-rc1` |
+| `Running` | `True` |
+| `Interactive` | `True` in a supported interactive console |
+| `LiveHighlightingEnabled` | `True` |
+| `DiscoveryHealthy` | `True` after successful command discovery |
+| `ColouringStatus` | Reports that the live editor is active |
 
-## Important implementation and security boundaries
+Type `Get-Dtae` without pressing Enter. With `Get-Date` as the closest indexed command, `Get-D` and the final `e` appear green. The swapped `t` and `a` appear orange. Correct the spelling to `Get-Date` and the whole name turns green, even on first use. Press **Ctrl+C** to clear the line.
 
-- Command-risk analysis is advisory. It reports a limited set of suspicious command patterns; it does not intercept or block command execution.
-- Sensitive-history patterns are used to exclude lines from PDE's own history index. They do **not** install a PSReadLine `AddToHistoryHandler`, remove entries from the actual PSReadLine history file, or guarantee that secrets are not persisted by PowerShell.
-- Green highlighting means that the typed command characters align to a command name or command-name prefix present in PDE's indexed history. A saved PSReadLine history file does not record exit codes, so an imported historical command cannot be assumed to have succeeded.
-- Yellow highlighting means the typed command characters align to a recognised command or valid command prefix that is not present in PDE's indexed history.
-- Red highlighting marks typed command characters that do not align to the selected recognised command candidate. If no suitable candidate is found within the configured distance, the command token is all red.
-- Only the command-name token (`CommandElements[0]`) receives command-name colours. Arguments and parameters remain neutral. Recognised PowerShell separators receive yellow.
-- Live rendering is deliberately limited to single-line, printable ASCII input that does not wrap. Multi-line, non-ASCII, and wrapped input is left to PSReadLine.
-- The live highlighter uses compiled C# for distance calculation and character alignment, but PowerShell still parses the active input line into an AST and performs terminal rendering. No end-to-end sub-millisecond latency benchmark is claimed.
-- Keyboard-handler registration and automated colour-map tests do not prove physical typing, cursor placement, clipboard behaviour, or behaviour in every terminal host. Those require manual testing.
+## Requirements
 
----
-
-# 1. Overview and scope
-
-## 1.1 Purpose
-
-PDE Command Intelligence extends an interactive PowerShell session with a searchable command index, an internal history index, command suggestions, syntax inspection, selected risk warnings, and a live command-name colour overlay.
-
-The component uses `Get-Command -All` to discover commands, PowerShell parser APIs to inspect active command text, `PSParser.Tokenize` for faster bulk history command extraction, and PSReadLine to manage the interactive input buffer.
-
-The live highlighter distinguishes a command that has previously appeared in PDE's accepted history index from a recognised but unused command. For an invalid spelling, it searches a bounded set of likely command candidates and aligns the typed characters against the best candidate.
-
-## 1.2 Main capabilities
-
-| Capability | Implemented purpose |
+| Environment | Live-editor requirement |
 |---|---|
-| Command indexing | Index available cmdlets, functions, aliases, scripts and executable commands returned by `Get-Command -All`. |
-| Prefix indexing | Build a case-insensitive set of every leading prefix of each indexed command name. |
-| History indexing | Build a newest-first list of accepted command lines plus sets of command names and their prefixes found in indexed history. |
-| Successful-command learning | Wrap the existing `prompt` function and add newly completed successful session commands to PDE's history index. |
-| Sensitive-line filtering | Exclude lines matching four compiled credential-pattern groups from PDE's own history index. |
-| Predictive IntelliSense | Configure PSReadLine's history-based prediction when supported by the installed version. |
-| Character-level highlighting | Colour matched command characters green or yellow and mismatched typed command characters red. |
-| Fuzzy suggestions | Suggest command names or history lines by prefix and edit-distance matching. |
-| AST analysis | Report parse errors, command AST nodes, recognised or unknown command names, and selected risk warnings. |
-| PSReadLine integration | Configure syntax colours, prediction view, prefix-history navigation, completion handlers, editing redraws and paste handling. |
-| Diagnostics | Report component state, indexed counts, PowerShell/PSReadLine details and run the built-in checks. |
-| Optional logging | Write INFO/WARN/ERROR diagnostics when logging is enabled; logging failures are suppressed. |
+| Windows PowerShell | Version 5.1; bundled Desktop editor targets .NET Framework 4.6.2 |
+| PowerShell Core | Version 7.4 or later; bundled Core editor targets .NET 8 |
+| Terminal | Interactive console with suitable ANSI/VT colour support |
+| Permissions | Current-user installation; administrator rights are not normally needed |
+| Network | No runtime downloads required for PDE installation |
 
-## 1.3 Out of scope
+PowerShell 7 is optional if you use Windows PowerShell 5.1. Installing PDE does not install PowerShell itself. PowerShell 7.0–7.3 do not meet this live-editor build's requirements.
 
-The nine files in this Command Intelligence component do not implement the wider PDE features below. They must not be documented as available unless separate source files are added and integrated:
+IDE output panels, redirected input/output and noninteractive script runners are not live console editors. ISE and host-specific profile integration are not configured automatically.
 
-- CPU, RAM, disk-capacity or physical disk-health monitoring.
-- Network adapter, route, firewall, DNS, TCP-port or Internet diagnostics.
-- Installed-software or certificate inventory.
-- Docker management.
-- Git, .NET, Python or Node.js project tooling.
-- Project discovery or build orchestration.
-- AI-based command suggestions.
-- A command-execution security boundary or command-blocking policy.
-- Automatic purging of sensitive entries from the actual PSReadLine history file.
-- Continuous background monitoring of the machine.
+## Installation and portable use
 
-## 1.4 Design principles
+### One-click installation
 
-1. PSReadLine remains the input-buffer and editing engine.
-2. PDE uses AST parsing for the active command line and interactive history additions.
-3. Bulk history import uses a tokenizer rather than building a full AST for every saved line.
-4. The live alignment algorithm is compiled C# to avoid running the Levenshtein matrix and backtracking loops in PowerShell on every redraw.
-5. Candidate collection is capped at 25 names and the best candidate is selected with a single-pass comparison.
-6. The highlighter does not recolour arguments or parameters as command names.
-7. Unsafe terminal layouts are left to PSReadLine rather than manually repainted.
-8. The feature scripts are dot-sourced so they share the loader's global configuration and state.
-
-# 2. Architecture and startup
-
-## 2.1 Project layout
-
-The component contains a profile bootstrap, a main loader and nine feature scripts:
+Double-click `Install-PDE.cmd` from the extracted folder. The default Windows installation directory is:
 
 ```text
-PowerShell profile ($PROFILE)
-└── dot-sources PDE-V2.ps1
-    ├── dependency checks
-    ├── global configuration and runtime state
-    ├── loads the nine feature scripts in order
-    └── initialises indexes and PSReadLine integration
-
-Modules\
-├── PDE-Logging.ps1
-├── PDE-Prompt-History.ps1
-├── PDE-Command-Index.ps1
-├── PDE-History-Index.ps1
-├── PDE-AST-Analysis.ps1
-├── PDE-Fuzzy-Suggestions.ps1
-├── PDE-PSReadLine-Integration.ps1
-├── PDE-Live-Highlighting.ps1
-└── PDE-Management-Diagnostics.ps1
+%LOCALAPPDATA%\PDE
 ```
 
-In the distributed modular layout, the loader can resolve `Modules` relative to `$PSScriptRoot`. In the current user installation, the loader was adjusted to resolve `Modules` beside the active profile directory:
+The installer validates release files, copies them, creates unique backups for changed existing files, and adds a managed startup block to the detected editions' current-user console profiles. It preserves unrelated profile content. Installation attempts to roll back completed writes if a later write fails.
+
+If scripts or DLLs are marked as downloaded, the installer may ask whether to trust and unblock them. A user-level `RemoteSigned` execution-policy change, when needed, requires consent. Organization policies are not bypassed.
+
+If only Windows PowerShell was configured, use that edition. When PowerShell 7 is installed in an unusual portable location, set its executable path and rerun setup from PowerShell:
 
 ```powershell
-$PDE_ModuleDirectory = Join-Path (Split-Path -Parent $PROFILE) 'Modules'
+# Replace this example path with your real pwsh.exe path.
+$env:PDE_PWSH_PATH = 'D:\Tools\PowerShell\pwsh.exe'
+& '.\Install-PDE.cmd'
 ```
 
-Use one path strategy consistently. The nine files must be in the directory selected by `$PDE_ModuleDirectory`.
+Detection checks PATH, common per-user/machine locations, WinGet links and registry entries. Detection of a PowerShell 7 executable does not establish that it meets the live editor's 7.4 minimum.
 
-## 2.2 Responsibilities of all nine feature files
+### Portable use without profile installation
 
-| File | Responsibilities and principal functions |
+Open a console in the extracted release folder:
+
+```powershell
+. .\PDE.ps1
+Get-PDEStatus
+```
+
+The dot and following space are required: dot-sourcing makes PDE's commands available in the current session. For a path containing spaces:
+
+```powershell
+. 'C:\My Tools\PDE\PDE.ps1'
+```
+
+### Install through PowerShell
+
+From the complete extracted release folder:
+
+```powershell
+. .\PDE.ps1 -NoStart
+Install-PDE
+```
+
+This installs for the current PowerShell host. The CMD installer handles both detected console editions. Preview changes with:
+
+```powershell
+Install-PDE -WhatIf
+```
+
+Choose another installation directory if necessary:
+
+```powershell
+Install-PDE -DestinationDirectory (Join-Path $HOME 'Tools\PDE')
+```
+
+Keep every application file together in a single flat folder.
+
+## How the colours work
+
+PDE checks command names as you type. These examples use `Get-Date` as the target.
+
+| Colour | When it appears | Example |
+|---|---|---|
+| Green | A typed character matches the target at the same position, ignoring case. Known commands and exact prefixes are green immediately. | Every letter of `Get-Dat` is green. |
+| Orange | A misplaced letter is still available elsewhere in the target. Orange also marks uncertain command resolution. | The `t` and `a` in `Get-Dtae` are orange. |
+| Red | A typed letter has no remaining match. If PDE finds no close command and discovery is healthy, the whole unknown name is red. | The `x` in `Get-Datx` is red. |
+| Gray | The inline predictor offers text beyond what you typed. | If you type `Get-D` and the editor suggests `ate`, only the suggested suffix appears gray. |
+
+Exact positions take priority. For example, when the target is `ssh` and you type `shh`, the first `s` and final `h` are green. The middle `h` is red because the target’s only `h` already has an exact match. In the live editor, ordinary arguments, switches, pipes and spaces use the terminal’s normal foreground. The standalone preview shows neutral text in gray.
+
+For an unfamiliar spelling, PDE compares nearby command names. It favours lower edit distance, then a longer matching prefix, then a name that succeeded in this session, then alphabetical order. Your installed commands can therefore affect which target is selected. When discovery is unavailable, PDE treats unresolved input as uncertain. Paths and module-qualified names can also appear orange.
+
+### Enable or disable live colours
+
+```powershell
+Enable-PDELiveHighlight
+Disable-PDELiveHighlight
+```
+
+Disabling live mode restores the native host reader. To change PDE's preference for future starts in this session:
+
+```powershell
+Set-PDEOptions -EnableLiveHighlight $false
+Set-PDEOptions -EnableLiveHighlight $true
+```
+
+A standalone preview is also available:
+
+```powershell
+Show-PDEHighlight 'Get-Date | FakeCommand -Name test'
+```
+
+The preview does not execute the string. It is separate from live editing and cannot, by itself, prove that the live editor is running.
+
+## Everyday commands
+
+| Command | Purpose |
 |---|---|
-| `PDE-Logging.ps1` | `Write-PDELog`; compiles and applies sensitive-history regex rules; `Test-PDESensitiveHistoryLine`; tracks recognised history command names/prefixes; `Add-PDEHistoryEntry` for interactive additions. |
-| `PDE-Prompt-History.ps1` | Saves the original prompt, wraps `prompt`, detects a newly completed session history item and adds it when the preceding command succeeded. |
-| `PDE-Command-Index.ps1` | `Update-PDEIndex`, `Test-PDECommandName`, `Test-PDEHistoryLineRecognised`; discovers commands and builds command prefixes. |
-| `PDE-History-Index.ps1` | `Get-PDEFastHistoryCommandNames`, `Add-PDEHistoryIndexEntryFast`, `Update-PDEHistory`; imports session and saved history without repeated front insertion. |
-| `PDE-AST-Analysis.ps1` | `Get-PDECommandAnalysis` and `Test-PDESyntax`; parses text, inspects command AST nodes and generates selected advisory risk warnings. |
-| `PDE-Fuzzy-Suggestions.ps1` | `Get-PDELevenshteinDistance` and `Get-PDESuggestions`; produces prefix and fuzzy suggestions from command and history indexes. |
-| `PDE-PSReadLine-Integration.ps1` | `Invoke-PDEApplyOptions` and `Set-PDEOptions`; applies supported token colours, history prediction, view style and navigation bindings. |
-| `PDE-Live-Highlighting.ps1` | Compiles `PDE.LevenshteinHelper`; `Get-PDECommandNameColorMap`, `Get-PDELineColorMap`, `Invoke-PDELiveHighlight`, `Install-PDELiveHighlightHandlers`; handles character alignment and live redraw. |
-| `PDE-Management-Diagnostics.ps1` | `Get-PDEStatus`, `Get-PDEStatistics`, `Get-PDEDiagnostics`, `Get-PDEHelp`, and `Test-PDE`. The refactored version tests `Get-PDECommandNameColorMap` and reports helper readiness. |
+| `Get-PDEStatus` | Version, live-editor state, discovery, learning, timings and last error |
+| `Get-PDEDiagnostics` | Status plus host/OS information and diagnostic guidance |
+| `Get-PDEStatistics` | Current PDE status/statistics snapshot |
+| `Get-PDEHelp` | Lists the main PDE commands |
+| `Get-PDESuggestions` | Prefix and typo suggestions |
+| `Get-PDECommandAnalysis` | AST command recognition and parse diagnostics |
+| `Test-PDESyntax` | Valid/incomplete/invalid syntax result |
+| `Show-PDEHighlight` | Non-executing coloured preview |
+| `Update-PDEIndex -Force` | Rediscover commands after environment/tool/module changes |
+| `Update-PDEHistory` | Reports session learning state; does not import history files |
+| `Clear-PDEHistory` | Clears PDE's learned successful names |
+| `Enable-PDEPromptLearning` | Enables prompt-based learning in an interactive session |
+| `Disable-PDEPromptLearning` | Restores PDE's original prompt when PDE still owns it |
+| `Set-PDEOptions` | Updates PDE's session settings |
+| `Stop-PDE` | Stops PDE and restores its owned reader/prompt/prediction settings |
+| `Start-PDE` | Starts PDE again |
+| `Start-PDE -Force` | Reinitialises PDE state; learned successes are reset |
+| `Install-PDE` / `Uninstall-PDE` | Manage current-host profile integration |
+| `Test-PDE` | Runs automated tests in a disposable child process |
 
-The optimised refactor replaces three main component files (`PDE-Logging.ps1`, `PDE-History-Index.ps1`, and `PDE-Live-Highlighting.ps1`). It also includes a compatible update to `PDE-Management-Diagnostics.ps1`, because the old diagnostics implementation called `Get-PDEInputHighlightClass`, which is removed from the optimised highlighter. This is still a nine-module project; the diagnostics update replaces an existing module and does not add a tenth module.
-
-## 2.3 Shared configuration
-
-The loader creates `$global:PDE_Config` as an ordered hashtable when it does not already exist. Default values are added only when a key is missing, so pre-existing values survive a profile reload.
-
-## 2.4 Shared runtime state
-
-The loader creates `$global:PDE_State` when it does not already exist. The initial state includes:
-
-| State member | Purpose |
-|---|---|
-| `CommandNames` | Case-insensitive set of available command names. |
-| `CommandPrefixes` | Case-insensitive set of command-name prefixes. |
-| `CommandInfo` | Lookup table of `Get-Command` metadata. |
-| `History` | Newest-first list of accepted history command lines. |
-| `HistorySet` | Ordinal set used to deduplicate full history lines. |
-| `LastIndexUpdate` | Timestamp of the last command-index update. |
-| `LastHistoryUpdate` | Timestamp of the last history-index update. |
-| `PredictionAvailable` | Whether PSReadLine prediction configuration was accepted. |
-| `PredictionViewStyleEffective` | Effective InlineView or ListView setting. |
-| `PredictionReason` | Human-readable prediction status. |
-| `LastError` | Most recent recorded index or startup error. |
-| `Version` | Component version (`3.1.2`). |
-| `LiveHighlightingEnabled` | Whether live handler installation completed. |
-| `PasteInProgress` | Guard that suspends PDE repaint during clipboard insertion. |
-| `HistoryCommandNames` | Created by the logging/history helpers; contains recognised command names represented in PDE's history index. |
-| `HistoryCommandPrefixes` | Created by the logging/history helpers; contains every prefix of those history command names. |
-| `LevenshteinHelperReady` | Set by the highlighter after the compiled C# helper is loaded and warmed. |
-
-Compatibility variables `$global:PDE_Cmds`, `$global:PDE_Prefs`, and `$global:PDE_Past` reference the command names, command prefixes and history collections respectively. Additional legacy suggestion/history variables are also initialised by the loader.
-
-## 2.5 Module load and startup order
-
-The loader dot-sources the files in this order:
-
-1. `PDE-Logging.ps1`
-2. `PDE-Prompt-History.ps1`
-3. `PDE-Command-Index.ps1`
-4. `PDE-History-Index.ps1`
-5. `PDE-AST-Analysis.ps1`
-6. `PDE-Fuzzy-Suggestions.ps1`
-7. `PDE-PSReadLine-Integration.ps1`
-8. `PDE-Live-Highlighting.ps1`
-9. `PDE-Management-Diagnostics.ps1`
-
-The startup block then forces a command-index refresh, builds the history index, applies PSReadLine options and installs live highlighting.
-
-The loader first imports PSReadLine and checks that `Set-PSReadLineOption` and `Set-PSReadLineKeyHandler` are available. If these checks fail, it warns and returns. Missing feature files or module-load exceptions are caught and reported as a module-loading warning.
-
-## 2.6 Prompt behaviour
-
-`PDE-Prompt-History.ps1` defines a global `prompt` wrapper. It preserves the previously defined prompt scriptblock, checks the last command's success state, inspects the latest `Get-History` entry and adds a new successful command through `Add-PDEHistoryEntry`.
-
-The original prompt output is called and returned when available; otherwise PDE uses a basic `PS <path>>` fallback. Therefore the project does define a custom wrapper around `prompt`; it does not leave the global prompt function untouched.
-
-The live highlighter also calls `[Console]::SetCursorPosition` when painting the input line. Any loader comments claiming that PDE never uses a custom prompt or never calls `Console.SetCursorPosition` are stale and should be corrected.
-
-# 3. Command and executable indexing
-
-## 3.1 Command discovery
-
-`Update-PDEIndex` calls:
+Inspect an error clearly:
 
 ```powershell
-Get-Command -All -ErrorAction Stop
+Get-PDEStatus | Format-List Version, Running, Interactive, LiveHighlightingEnabled,
+    ColouringStatus, DiscoveryHealthy, PromptLearningEnabled, LastError
 ```
 
-It clears and rebuilds the command-name set, prefix set and metadata lookup. The indexed names include commands visible to the current session, such as cmdlets, functions, aliases, scripts and applications returned by `Get-Command`.
+## Suggestions and syntax checking
 
-## 3.2 Executable basenames
-
-For names ending in `.exe`, `.com`, `.cmd`, `.bat`, or `.ps1`, the basename without the extension is also added as a convenience lookup. The original name is retained.
-
-## 3.3 Prefix set
-
-For each indexed name, every leading substring from length one through the complete name is inserted into `CommandPrefixes`. This allows exact O(1)-average hash-set lookups for a typed prefix, subject to hash-table behaviour.
-
-## 3.4 Refresh policy
-
-The command index uses a ten-minute refresh interval. `Update-PDEIndex` returns the current counts without rebuilding while the index is still inside the interval. `-Force` rebuilds immediately.
+### Prefix and typo suggestions
 
 ```powershell
-Update-PDEIndex
-Update-PDEIndex -Force
+Get-PDESuggestions -Prefix 'Get-Pro' -Limit 5
+Get-PDESuggestions -Prefix 'Get-Proccess' -Fuzzy -Limit 3
+Get-PDESuggestions -Prefix 'Get-' -Source Command -Limit 10
+Get-PDESuggestions -Prefix 'Get-' -Source History -Limit 10
 ```
 
-## 3.5 Command recognition
+`Source` accepts `All`, `Command` or `History`. PDE's history source contains learned command names, not full argument-bearing command lines. Exact valid commands produce no correction. Suggestions never automatically execute or replace your input.
 
-`Test-PDECommandName` accepts a name from the pipeline or `-Name`, ensures the index is reasonably current, and returns the name, recognition result, command type and source when available.
+### Live-editor history predictions
 
-`Test-PDEHistoryLineRecognised` remains available as a full-AST history-line validator. The optimised bulk history import described in Section 4 uses the faster tokenizer function instead.
-
-# 4. History indexing and prompt learning
-
-## 4.1 Two history paths
-
-The refactored implementation uses different paths for bulk history import and a newly completed interactive command:
-
-- **Bulk import:** `Update-PDEHistory` uses `Get-PDEFastHistoryCommandNames` and `PSParser.Tokenize`; it does not construct a full AST for every saved history line.
-- **Interactive addition:** `Add-PDEHistoryEntry` uses the full PowerShell AST parser for the one newly completed line, rejects parse errors and extracts command AST names.
-
-This split reduces startup work while retaining stronger parsing for newly accepted interactive lines.
-
-## 4.2 Bulk token extraction
-
-`Get-PDEFastHistoryCommandNames` tokenizes a single-line history entry with `[System.Management.Automation.PSParser]::Tokenize`. It examines tokens whose type is `Command`, checks whether each command name exists in the command index or resolves to an existing file path, and rejects the line if a static command token is unresolved, the tokenizer reports errors, or no command token is found.
-
-This is lexical token extraction, not full AST validation. It is intended to reduce bulk import overhead. It should not be described as semantically equivalent to a complete AST walk for every possible PowerShell construct.
-
-## 4.3 O(N) bulk list construction
-
-`Add-PDEHistoryIndexEntryFast` appends accepted lines to a `List[string]`. `Update-PDEHistory` traverses the current-session history newest-to-oldest, then the saved PSReadLine history file newest-to-oldest, using a `HashSet` to avoid duplicate lines.
-
-Because bulk imports append rather than repeatedly calling `List.Insert(0, ...)`, list construction is O(N) in the number of accepted entries, apart from tokenization, command lookups and collection operations. The configured history limit caps the number of retained entries.
-
-`Add-PDEHistoryEntry` still inserts a single new interactive command at index zero when promoting it to newest position. That is a per-command operation; it is not used as the bulk-import loop.
-
-## 4.4 History ordering and precedence
-
-The final list is newest-first. Current-session entries are considered first, followed by saved file entries. Duplicate command lines are not added twice. The current-session item can therefore take precedence over an identical saved-file item.
-
-The `HistoryIndexLimit` default is 1,000. The saved file is read using `Get-Content -Tail` with the configured limit, and import stops when the in-memory list reaches the limit.
-
-## 4.5 History command-name indexes
-
-For each recognised command name extracted from an accepted history line, `Add-PDEHistoryCommandName` adds:
-
-- The exact command name to `HistoryCommandNames`.
-- Every leading prefix of that command name to `HistoryCommandPrefixes`.
-
-Only names present in the current command index are added. These sets drive the green-history distinction in the character-level highlighter.
-
-## 4.6 Sensitive-line filtering
-
-Before a line is added to PDE's own index, it is checked by `Test-PDESensitiveHistoryLine`. If it matches a configured pattern, it is excluded from the PDE index.
-
-This does **not** configure PSReadLine's `AddToHistoryHandler` and does not guarantee that PSReadLine will omit the same line from its persistent history file. It also does not purge existing entries.
-
-## 4.7 Session successful-command tracking
-
-The prompt wrapper compares the latest history ID with `$global:PDE_LastHistId`. When a new history item is detected and `$?` indicates success, the line is added through `Add-PDEHistoryEntry -PromoteDuplicate`.
-
-Saved history files do not store success/failure exit status. As a result, imported command names are treated as previously indexed history usage even though their original success cannot be proven.
-
-## 4.8 History refresh
+When live mode is active, configure its prediction setting directly:
 
 ```powershell
-Update-PDEHistory
+Set-PDELivePSReadLineOption -PredictionSource History
+Set-PDELivePSReadLineOption -PredictionSource None
 ```
 
-The result object reports:
+History prediction uses editor history and can include failed commands; it is separate from session success learning. `Set-PDEOptions -EnablePredictions` manages native PSReadLine prediction settings, so use the prefixed commands above for the active live editor.
 
-- `Entries`
-- `IndexedCommandNames`
-- `Order` (`Newest first`)
-- `Updated`
-- `HistoryPath`
+### Syntax analysis
 
-# 5. Utilities, sensitive filters and logging
+Pass text in quotes so it is analysed rather than executed:
 
-## 5.1 `Write-PDELog`
+```powershell
+Get-PDECommandAnalysis -Text 'Get-Date | FakeCommand'
+Test-PDESyntax -Text 'Get-Date'
+Test-PDESyntax -Text 'if ($true) {'
+Test-PDESyntax -Text 'Get-Date | |'
+```
 
-Logging is disabled by default through `EnableDiagnosticsLog = $false`. When enabled, `Write-PDELog` writes a timestamped INFO, WARN or ERROR entry to `DiagnosticsLogPath`.
+`Test-PDESyntax` returns `IsValid`, `IsIncomplete`, `Errors`, `CommandCount` and `UnknownCommands`. An unfinished brace or quote can be incomplete input rather than a completed invalid command. Syntax validity does not establish that execution will succeed or that arguments are appropriate.
 
-The implementation creates the parent directory when necessary, opens the file in append mode with read/write sharing, writes UTF-8 without a byte-order mark and disposes the writer/stream in a `finally` block.
+## History: view, clear and stop saving
 
-All logging failures are suppressed. This is best-effort logging: it does not retry a locked file or report a logging failure to the interactive console, because logging must not disrupt command-line input.
+There are **four different history stores**. Clearing one does not automatically clear the others.
 
-## 5.2 Compiled sensitive-history regexes
+| Store | Contains | How to clear |
+|---|---|---|
+| PDE success memory | Successful command names used in suggestion and colour-target ranking | `Clear-PDEHistory` |
+| PowerShell session history | Entries returned by `Get-History` | `Clear-History` |
+| Editor memory | Up-arrow/search history in native/live editors | Each editor's `ClearHistory()` API |
+| Editor history file | Command text saved between console sessions | Clear the selected file explicitly |
 
-Four regex patterns are compiled once and retained in `$global:PDE_SensitiveHistoryRegexes`. They use IgnoreCase, Compiled and CultureInvariant options, with a 100 ms match timeout.
+`Clear-Host` or `cls` only clears the display. It does not erase these history stores.
 
-The patterns target selected forms of:
+### Clear PDE’s learned command names
 
-1. Credential-like assignments containing password, passwd, token, API key, secret, client secret, authorization or bearer labels.
-2. Selected sensitive command-line parameters such as `-Password`, `-Token`, `-ApiKey` and related names.
-3. `ConvertTo-SecureString` used with `-AsPlainText`.
-4. Selected GitHub and Azure login commands that place a token or password directly on the command line.
+```powershell
+Clear-PDEHistory
+```
 
-The filter is heuristic. It does not cover every credential format, variable naming convention, secret provider or authentication workflow. A regex timeout or filter exception is treated conservatively as sensitive for PDE's own index.
+Colours refresh when the next editable line starts. Commands you execute after clearing can immediately become learned again, including management commands.
 
-## 5.3 `Add-PDEHistoryEntry`
+To clear learning and keep it disabled:
 
-This function handles an individual interactive command line. It trims and validates the line, rejects empty or multi-line input, applies the sensitive-line filter, parses the line with `Parser.ParseInput`, and rejects parser errors.
+```powershell
+Set-PDEOptions -EnablePromptLearning $false
+Clear-PDEHistory
+```
 
-It then deduplicates or promotes the line, inserts it at the front of the history list, extracts command AST nodes and adds recognised command names to `HistoryCommandNames` and `HistoryCommandPrefixes`. It trims the in-memory list to `HistoryIndexLimit`.
+Enable learning again when wanted:
 
-## 5.4 Safety boundary
+```powershell
+Set-PDEOptions -EnablePromptLearning $true
+```
 
-Sensitive-line matching is not a complete secret scanner and is not a security boundary. Do not type real credentials into a shell command simply because PDE has this filter. Use secure prompts, credential stores or supported secret-management tools. If a credential has already been exposed in history, rotate it; removing a history index entry does not invalidate it.
+### View PowerShell history and history locations
 
-# 6. Fuzzy suggestions
+```powershell
+Get-History
+(Get-PSReadLineOption).HistorySavePath
+```
 
-## 6.1 `Get-PDELevenshteinDistance`
+With live mode enabled, also check its actual path:
 
-The public fuzzy-suggestion function in `PDE-Fuzzy-Suggestions.ps1` uses a PowerShell dynamic-programming implementation of standard Levenshtein distance with two integer arrays. It supports insertion, deletion and substitution. This public suggestion implementation remains PowerShell; the compiled C# helper described in Section 8 is used by the live character highlighter.
+```powershell
+(Get-PDELivePSReadLineOption).HistorySavePath
+```
 
-## 6.2 `Get-PDESuggestions`
+Paths can differ by edition or configuration. Avoid posting history contents publicly; they may contain private paths, arguments or secrets.
 
-Parameters:
+### Clear current-session command and editor memory
 
-| Parameter | Meaning |
-|---|---|
-| `-Prefix` | Text to match; defaults to an empty string. |
-| `-Source` | `All`, `History` or `Command`; defaults to `All`. |
-| `-Limit` | Maximum number of suggestions, 1–100; defaults to 10. |
-| `-Fuzzy` | Explicitly requests fuzzy command suggestions. |
+These commands do not erase saved history files:
 
-History suggestions use prefix matching against complete indexed history lines. Command suggestions first include command names that start with the supplied prefix. Fuzzy command matching runs when `-Fuzzy` is specified or `EnableFuzzySuggestions` is true, and the prefix is at least three characters long.
+```powershell
+Clear-History
 
-The results include the suggestion text, source, match type, edit distance and rank. The function sorts by distance, rank and suggestion text, groups duplicate suggestion strings and returns the first `Limit` results.
+# Native PSReadLine memory, when the module is loaded.
+if (Get-Module PSReadLine) {
+    [Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory()
+}
+
+# PDE live-editor memory, once its type has been loaded.
+if ('PDE.PowerShell.PSConsoleReadLine' -as [type]) {
+    [PDE.PowerShell.PSConsoleReadLine]::ClearHistory()
+}
+
+Clear-PDEHistory
+```
+
+### Stop future history saving for this session
+
+Set both editors so switching modes does not unexpectedly restore saving. Setting native `SaveNothing` also causes PDE's learning code to decline new success entries.
+
+```powershell
+Set-PSReadLineOption -HistorySaveStyle SaveNothing
+
+if (Get-Command Set-PDELivePSReadLineOption -ErrorAction SilentlyContinue) {
+    Set-PDELivePSReadLineOption -HistorySaveStyle SaveNothing
+}
+
+Set-PDEOptions -EnablePromptLearning $false
+```
+
+`SaveNothing` controls persistence; it does not erase old disk history and should not be treated as a guarantee of zero in-memory history or zero logging by other tools.
+
+To stop new entries being added to both editors' history as well, an acceptance handler can be used:
+
+```powershell
+# Optional: replaces any existing custom history acceptance handler.
+Set-PSReadLineOption -AddToHistoryHandler { $false }
+if (Get-Command Set-PDELivePSReadLineOption -ErrorAction SilentlyContinue) {
+    Set-PDELivePSReadLineOption -AddToHistoryHandler { $false }
+}
+```
+
+Use a fresh console to recover your normal profile-defined handlers; do not reset handlers blindly if you had a custom secret-filtering policy.
+
+### Erase saved history files
+
+**This permanently removes the command text from the selected files.** Close other PowerShell windows first: another process can write history back. Repeat for each edition/custom history path you intend to clear. This does not erase transcripts, logs, backups or history elsewhere.
+
+Run the following in the one console you have kept open. It collects the configured paths, disables saving and learning, then empties those files and the current history stores:
+
+```powershell
+$historyPaths = @((Get-PSReadLineOption).HistorySavePath)
+if (Get-Command Get-PDELivePSReadLineOption -ErrorAction SilentlyContinue) {
+    $historyPaths += (Get-PDELivePSReadLineOption).HistorySavePath
+}
+$historyPaths = @($historyPaths | Where-Object { $_ } | Sort-Object -Unique)
+
+# Review the exact files before clearing them.
+$historyPaths
+```
+
+After reviewing those paths, run:
+
+```powershell
+Set-PSReadLineOption -HistorySaveStyle SaveNothing
+if (Get-Command Set-PDELivePSReadLineOption -ErrorAction SilentlyContinue) {
+    Set-PDELivePSReadLineOption -HistorySaveStyle SaveNothing
+}
+Set-PDEOptions -EnablePromptLearning $false
+
+foreach ($historyFile in $historyPaths) {
+    if ([IO.File]::Exists($historyFile)) {
+        [IO.File]::WriteAllText($historyFile, '')
+    }
+}
+
+Clear-History
+if (Get-Module PSReadLine) {
+    [Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory()
+}
+if ('PDE.PowerShell.PSConsoleReadLine' -as [type]) {
+    [PDE.PowerShell.PSConsoleReadLine]::ClearHistory()
+}
+Clear-PDEHistory
+```
+
+Close that console afterward. New commands and newly opened consoles may build history again according to their settings.
+
+### Resume normal saving
+
+If you disabled saving and want incremental saving again:
+
+```powershell
+Set-PSReadLineOption -HistorySaveStyle SaveIncrementally
+if (Get-Command Set-PDELivePSReadLineOption -ErrorAction SilentlyContinue) {
+    Set-PDELivePSReadLineOption -HistorySaveStyle SaveIncrementally
+}
+Set-PDEOptions -EnablePromptLearning $true
+```
+
+This does not restore a replaced `AddToHistoryHandler`; reopen a fresh console or restore the handler you previously saved.
+
+## Configuration
+
+PDE options are session-only unless you add your choices to your profile.
+
+| `Set-PDEOptions` parameter | Default | Allowed values / purpose |
+|---|---|---|
+| `EnableLiveHighlight` | `$true` | Enables/disables live editor |
+| `EnablePromptLearning` | `$true` | Enables/disables success learning |
+| `EnablePredictions` | `$true` | Native PSReadLine prediction preference |
+| `EnableFuzzySuggestions` | `$true` | Allows fuzzy results in PDE suggestions |
+| `FuzzyMaximumDistance` | `2` | Integer `1`–`4` |
+| `HistoryIndexLimit` | `1500` | Integer `1`–`20000`; learned-name limit |
+| `CommandRefreshSeconds` | `600` | Integer `10`–`3600`; full discovery throttle |
+| `EnableDiagnosticsLog` | `$false` | Enables best-effort diagnostic logging |
+| `DiagnosticsLogPath` | `$HOME\PDE-diagnostics.log` | Log destination; parent directory must exist |
 
 Examples:
 
 ```powershell
-Get-PDESuggestions -Prefix 'Get-Da' -Source Command
-Get-PDESuggestions -Prefix 'Get-Procss' -Source Command -Fuzzy
-Get-PDESuggestions -Prefix 'Get-PDE' -Source History
+Set-PDEOptions -FuzzyMaximumDistance 2 -CommandRefreshSeconds 300
+Set-PDEOptions -EnablePromptLearning $false
+Set-PDEOptions -EnableLiveHighlight $true
+Set-PDEOptions -EnableDiagnosticsLog $true `
+    -DiagnosticsLogPath (Join-Path $HOME 'PDE-diagnostics.log')
 ```
 
-**Performance distinction:** the 25-candidate cap and single-pass best-match selection apply to the live highlighter's per-keystroke command alignment. They do not currently apply to `Get-PDESuggestions`, which scans the command-name set and uses a PowerShell sorting/grouping pipeline.
-
-# 7. AST analysis and command-risk inspection
-
-## 7.1 `Get-PDECommandAnalysis`
-
-This function updates the command index if its refresh interval has expired, calls `Parser.ParseInput` on the supplied text and finds `CommandAst` nodes.
-
-Each command result can include:
-
-- `Name`
-- `IsRecognised`
-- `IsDynamic`
-- `CommandType`
-- `Source`
-- `StartOffset`
-- `EndOffset`
-
-The returned summary contains `IsSyntacticallyValid`, `ParseErrors`, `Commands`, `UnknownCommands` and `RiskWarnings`.
-
-## 7.2 `Test-PDESyntax`
-
-This is a smaller wrapper over `Get-PDECommandAnalysis`. It returns `IsValid`, `Errors`, `CommandCount` and `UnknownCommands`.
-
-## 7.3 Risk patterns
-
-The current implementation reports warnings for selected command names:
-
-| Pattern | Warning |
-|---|---|
-| `Remove-Item`, `rm`, `ri`, `del`, `erase`, `rmdir` | File or directory deletion command detected. |
-| `Clear-Disk`, `Format-Volume`, `Format-Partition`, `Remove-Partition`, `diskpart` | Disk or volume modification command detected. |
-| `Restart-Computer`, `Stop-Computer`, `Stop-Service`, `Restart-Service`, `Stop-Process`, `taskkill` | System, service or process interruption command detected. |
-| `Set-ExecutionPolicy` with `Unrestricted` or `Bypass` in the command extent | Permissive execution policy detected. |
-
-The checks operate on parsed command AST nodes, so simply mentioning one of these words in a comment or quoted string does not normally trigger the command-name rule.
-
-## 7.4 Limitations
-
-Risk checks are advisory. They do not block or approve commands, and they do not understand all parameter values, aliases, dynamic command names, scripts, external executables or indirect side effects. A command with no warning is not guaranteed to be safe.
-
-# 8. Live character-level highlighting
-
-## 8.1 Compiled helper
-
-`PDE-Live-Highlighting.ps1` defines the C# type `PDE.LevenshteinHelper` through `Add-Type` if that type is not already loaded in the PowerShell process.
-
-The helper exposes:
-
-| Method | Purpose |
-|---|---|
-| `GetDistance(string, string)` | Calculate case-insensitive Levenshtein distance using a C# dynamic-programming matrix. |
-| `CommonPrefixLength(string, string)` | Count the matching initial characters, case-insensitively. |
-| `GetAlignmentMap(string, string, int)` | Backtrack through the alignment matrix and return one colour value per typed character. |
-
-The helper is warmed during module loading so that its initial JIT compilation is not first triggered by a user's keystroke. The type remains loaded for the lifetime of the PowerShell process. When replacing the C# implementation, restart PowerShell before loading the new type because .NET types added with `Add-Type` cannot normally be unloaded from the current process.
-
-The C# helper accelerates edit-distance and alignment loops. It allocates a two-dimensional matrix for each distance/alignment operation; the code does not establish a measured sub-millisecond end-to-end latency guarantee.
-
-## 8.2 Character colour values
-
-`Get-PDECommandNameColorMap` returns one integer per typed character:
-
-| Integer | Colour | Meaning |
-|---:|---|---|
-| 0 | Neutral | Not part of the coloured command token or no applicable classification. |
-| 1 | Yellow | Character aligned to a known command or command prefix not present in indexed history. |
-| 2 | Red | Typed character that does not align to the selected command candidate. |
-| 3 | Green | Character aligned to a recognised command or command prefix present in indexed history. |
-
-## 8.3 Exact command and valid prefix
-
-If the typed name is an exact indexed command, every character is yellow unless the command name is in `HistoryCommandNames`, in which case every character is green.
-
-If the typed name is a valid command prefix, every character is yellow unless the prefix is in `HistoryCommandPrefixes`, in which case every character is green.
-
-## 8.4 Typo candidate selection
-
-For an invalid spelling, the highlighter:
-
-1. Searches from the longest leading prefix downwards until it finds a valid indexed command prefix.
-2. If no useful leading prefix is found, tries progressively shorter typed suffixes.
-3. Enumerates candidates with imperative loops and stores no more than 25 unique names.
-4. Calculates distance, common-prefix length, history-use status and length difference for each candidate.
-5. Selects the best candidate in a single pass using this priority: lowest edit distance, longest common prefix, previously used candidate, smallest length difference, then case-insensitive alphabetical order.
-6. Uses the C# backtracking alignment map to classify each typed character.
-
-If the selected candidate was found in the indexed history, aligned characters are green. Otherwise, aligned characters are yellow. Incorrect typed characters are red. If the candidate requires a character that the user omitted, the nearest typed character is marked red to make the omission visible.
-
-The candidate count is capped at 25, but candidate enumeration may still scan part or all of the command-name set to find those candidates. The cap bounds the expensive distance/ranking work, not necessarily every lookup iteration.
-
-## 8.5 Examples
-
-Assuming `cls` is in PDE's indexed history and is the chosen nearest candidate:
-
-| Typed input | Expected map | Explanation |
-|---|---|---|
-| `cls` | `G G G` | Exact recognised command found in indexed history. |
-| `cld` | `G G R` | First two characters align with `cls`; final character does not. |
-| `Get-Verb` | `Y Y Y Y Y Y Y Y` | Recognised command not present in indexed history. |
-| `Get-PDEStatus` | All green when indexed in history | Exact command is in the history command-name set. |
-
-These are examples dependent on the current command and history indexes, not hard-coded outputs.
-
-## 8.6 Command-token-only colouring
-
-`Get-PDELineColorMap` parses the active input line and visits `CommandAst` nodes. It applies the name map only to `CommandElements[0]`, which represents the command-name element. Parameters, arguments, quoted strings and other command elements remain neutral.
-
-If a quoted or transformed command element has an extent length that does not match the command name returned by the AST, that element is left neutral rather than risking incorrect character offsets.
-
-PowerShell separator tokens (`Pipe`, `Semicolon`, `Ampersand`, `AndAnd` and `OrOr`) are coloured yellow. They are separators, not command-name characters.
-
-## 8.7 Per-keystroke processing and rendering
-
-When the highlighter runs, it:
-
-1. Reads the PSReadLine buffer and cursor offset.
-2. Skips empty, multi-line or non-ASCII input.
-3. Reads console width and cursor coordinates.
-4. Skips rendering if the input would wrap or cursor geometry is uncertain.
-5. Refresh-checks the command index.
-6. Parses the active line into an AST and obtains the character colour map.
-7. Writes contiguous runs using ANSI colour sequences.
-8. Restores the original cursor coordinates.
-
-The C# helper removes the Levenshtein matrix/backtracking loops from PowerShell, but `Parser.ParseInput`, PowerShell control flow, candidate discovery and terminal output still occur in the redraw path. Benchmark the complete path on the target terminal before making latency claims.
-
-# 9. PSReadLine integration and keyboard handlers
-
-## 9.1 Prediction and options
-
-The loader defaults are:
-
-| Configuration key | Default | Purpose |
-|---|---:|---|
-| `EnablePredictions` | `$true` | Enable PSReadLine predictions when supported. |
-| `PredictionViewStyle` | `InlineView` | Select InlineView or ListView. |
-| `MaximumHistoryCount` | `10000` | PSReadLine maximum history count. |
-| `HistoryIndexLimit` | `1000` | PDE in-memory history index limit. |
-| `EnableHistorySearch` | `$true` | Enable prefix-history navigation. |
-| `EnableFuzzySuggestions` | `$true` | Enable fuzzy command suggestions by default. |
-| `FuzzyMaximumDistance` | `2` | Maximum edit distance for fuzzy suggestions and live typo candidate selection. |
-| `EnableToolTips` | `$true` | Enable PSReadLine tooltips when supported. |
-| `EnableDiagnosticsLog` | `$false` | Enable PDE file logging. |
-| `DiagnosticsLogPath` | `%LOCALAPPDATA%\PDE\PDE.log` | Default log location. |
-
-PDE configures `PredictionSource = History` when the installed `Set-PSReadLineOption` exposes that parameter. If predictions are disabled, it sets the source to `None` where supported. The effective prediction state and reason are stored in `$global:PDE_State`.
-
-## 9.2 Native token colours
-
-`Invoke-PDEApplyOptions` maps available PSReadLine colour properties to console colours for commands, parameters, variables, strings, numbers, types, members, keywords, operators, comments, errors, default text, continuation prompts, emphasis and prediction text. It checks the installed options object before applying supported colour properties.
-
-These native PSReadLine token colours are distinct from PDE's ANSI live overlay. PDE's yellow/red/green command-name classification is applied by the live renderer; PSReadLine's syntax colours continue to handle the rest of the input presentation.
-
-## 9.3 Key handlers installed by the integration layer
-
-| Key | Behaviour |
-|---|---|
-| UpArrow / DownArrow in InlineView | Prefix-based history search when `EnableHistorySearch` is enabled. Otherwise native previous/next history. |
-| UpArrow / DownArrow in ListView | Previous/next prediction suggestion. |
-| F8 / Shift+F8 in ListView | Backward/forward prefix-history search when enabled. |
-| Ctrl+RightArrow in InlineView | `ForwardWord`, allowing the next inline prediction word to be accepted when the cursor is at the end; otherwise standard word movement. |
-| Ctrl+RightArrow outside InlineView prediction mode | `NextWord`. |
-
-## 9.4 Key handlers installed by the live highlighter
-
-| Key | Behaviour |
-|---|---|
-| Printable ASCII characters 32–126 | Calls PSReadLine `SelfInsert`, then redraws highlighting. This preserves PSReadLine's native self-insert behaviour such as quote/bracket pairing where supported. |
-| Backspace | Calls `BackwardDeleteChar`, then redraws. |
-| Delete | Calls `DeleteChar`, then redraws. |
-| Tab | Calls `TabCompleteNext`, then redraws. |
-| Shift+Tab | Calls `TabCompletePrevious`, then redraws. |
-| Ctrl+W, Ctrl+Backspace, Alt+Backspace | Calls `BackwardKillWord`, then redraws. |
-| Ctrl+Delete | Calls `KillWord`, then redraws. |
-| Ctrl+V, Shift+Insert | Sets the paste guard, calls PSReadLine `Paste`, clears the guard in `finally`, then redraws once after successful insertion. |
-
-Left/right cursor movement is left to PSReadLine. The highlighter does not install custom redraw handlers for every cursor movement chord. This should be considered when validating visual behaviour after moving the cursor without changing the buffer.
-
-## 9.5 Paste behaviour
-
-PDE treats paste as one operation. It sets `PasteInProgress` before invoking PSReadLine's paste API, clears the flag in a `finally` block, and calls the highlighter once when paste completes. Multi-line and non-ASCII paste is left to PSReadLine by the highlighter's safety checks.
-
-## 9.6 Rendering limitations
-
-The live overlay is skipped when:
-
-- The input is empty.
-- The input contains a newline.
-- The input contains non-ASCII characters.
-- Console buffer width cannot be read or is too narrow.
-- The line would wrap based on the current start column and input length.
-- Cursor coordinates cannot be calculated safely.
-
-The component uses ANSI escape sequences and `Console.SetCursorPosition`; terminal hosts can differ in their support and cursor-cell behaviour. Test Windows Terminal, legacy console hosts and any IDE terminal separately if they are part of the intended environment.
-
-# 10. Configuration, runtime state and diagnostics
-
-## 10.1 `Set-PDEOptions`
-
-`Set-PDEOptions` updates only the parameters explicitly supplied, then calls `Invoke-PDEApplyOptions`.
-
-| Parameter | Validation |
-|---|---|
-| `EnablePredictions` | Boolean |
-| `PredictionViewStyle` | `InlineView` or `ListView` |
-| `MaximumHistoryCount` | 100–100000 |
-| `HistoryIndexLimit` | 100–10000 |
-| `FuzzyMaximumDistance` | 1–4 |
-| `EnableHistorySearch` | Boolean |
-| `EnableToolTips` | Boolean |
-| `EnableFuzzySuggestions` | Boolean |
-| `EnableDiagnosticsLog` | Boolean |
-
-Example:
+Inspect current preferences:
 
 ```powershell
-Set-PDEOptions -PredictionViewStyle ListView
-Set-PDEOptions -EnablePredictions $false
-Set-PDEOptions -EnableFuzzySuggestions $true -FuzzyMaximumDistance 3
-Set-PDEOptions -EnableDiagnosticsLog $true
+$global:PDE_Config
 ```
 
-Configuration changes are session-scoped unless the corresponding values are changed in the loader or another persistent configuration layer.
+Use `Set-PDEOptions` to change them rather than editing the state tables directly. Reducing `HistoryIndexLimit` does not immediately trim all existing entries; clear history or restart PDE to apply a smaller cap cleanly.
 
-## 10.2 Diagnostics functions
+### Keep preferences between sessions
 
-| Function | Purpose |
-|---|---|
-| `Get-PDEStatus` | Reports PDE, PowerShell and PSReadLine versions; command, prefix and history counts; prediction state; helper readiness; logging state and last error. |
-| `Get-PDEStatistics` | Refreshes history/index data and reports command, prefix, history and history-command-name counts. |
-| `Get-PDEDiagnostics` | Reports computer/host, PowerShell edition/version, OS, PSReadLine path/version, history path, console width, prediction support, C# helper readiness and log path. |
-| `Get-PDEHelp` | Calls `Get-Help -Full` for a named command. |
-| `Test-PDE` | Runs six built-in checks for PSReadLine, command index, AST parsing, unknown-character red mapping, command recognition and prediction availability. |
-
-The updated diagnostics file must accompany the updated highlighter because the old `Test-PDE` called `Get-PDEInputHighlightClass`, which is no longer part of the refactored highlighter.
-
-# 11. Complete function reference by file
-
-## 11.1 `PDE-Logging.ps1`
-
-- `Write-PDELog` — best-effort diagnostic file logging.
-- `Test-PDESensitiveHistoryLine` — compiled-regex scan for selected credential patterns.
-- `Add-PDEHistoryCommandName` — add a recognised history command name and all of its prefixes to the history-name sets.
-- `Add-PDEHistoryEntry` — AST-validate and promote one interactive history line.
-
-## 11.2 `PDE-Prompt-History.ps1`
-
-- `prompt` — wrapper that tracks newly completed successful commands and returns the original prompt output.
-
-The module also captures `$global:PDE_OriginalPrompt` and initialises `$global:PDE_LastHistId` when needed.
-
-## 11.3 `PDE-Command-Index.ps1`
-
-- `Update-PDEIndex` — discover available commands and build command/prefix indexes.
-- `Test-PDECommandName` — report command recognition and command metadata.
-- `Test-PDEHistoryLineRecognised` — full-AST validation for a history line; not the fast bulk import path.
-
-## 11.4 `PDE-History-Index.ps1`
-
-- `Get-PDEFastHistoryCommandNames` — use `PSParser.Tokenize` to extract and resolve command tokens from one saved line.
-- `Add-PDEHistoryIndexEntryFast` — append one validated bulk-import line and its command names.
-- `Update-PDEHistory` — rebuild the newest-first history list and command-name prefix sets.
-
-## 11.5 `PDE-AST-Analysis.ps1`
-
-- `Get-PDECommandAnalysis` — return syntax, command-recognition and risk-warning details.
-- `Test-PDESyntax` — return a compact syntax-validation object.
-
-## 11.6 `PDE-Fuzzy-Suggestions.ps1`
-
-- `Get-PDELevenshteinDistance` — PowerShell implementation of standard Levenshtein distance.
-- `Get-PDESuggestions` — prefix/fuzzy search across history and command indexes.
-
-## 11.7 `PDE-PSReadLine-Integration.ps1`
-
-- `Invoke-PDEApplyOptions` — apply supported PSReadLine colours, predictions and navigation bindings.
-- `Set-PDEOptions` — validate configuration changes and apply them.
-
-## 11.8 `PDE-Live-Highlighting.ps1`
-
-- `PDE.LevenshteinHelper` — inline C# static class with distance, common-prefix and alignment methods.
-- `Get-PDECommandNameColorMap` — return per-character colour values for a command name.
-- `Get-PDELineColorMap` — return a colour map for an entire input line, applying command colours only to command-name extents.
-- `Invoke-PDELiveHighlight` — render the safe single-line input overlay.
-- `Install-PDELiveHighlightHandlers` — register character insertion, deletion, completion, word-deletion and paste handlers.
-
-The refactored highlighter intentionally removes the earlier PowerShell functions `Get-PDEHistoryPrefixMatch`, `Get-PDEInputHighlightClass` and `Get-PDECharacterAlignmentMap`. Their roles are replaced by the command-name map and the compiled C# helper.
-
-## 11.9 `PDE-Management-Diagnostics.ps1`
-
-- `Get-PDEStatus` — current component status.
-- `Get-PDEStatistics` — index and history counts.
-- `Get-PDEDiagnostics` — environment and helper diagnostics.
-- `Get-PDEHelp` — full help for a command.
-- `Test-PDE` — six-check built-in self-test.
-
-# 12. Testing and validation
-
-## 12.1 Built-in checks
-
-Run:
+Open the current host's profile:
 
 ```powershell
-Test-PDE
+notepad $PROFILE.CurrentUserCurrentHost
 ```
 
-The refactored test suite checks:
-
-1. PSReadLine is loaded.
-2. The command index contains commands.
-3. A sample pipeline parses into at least two command AST nodes.
-4. A deliberately unrecognised repeated-character command maps entirely to red.
-5. `Get-Date` is recognised.
-6. Predictive IntelliSense is available according to PDE's PSReadLine configuration state.
-
-`Test-PDE` refreshes the command and history indexes before running these checks. A failed prediction check can indicate version or configuration support rather than a failure of AST or highlighting logic.
-
-## 12.2 Character-map checks
-
-For the refactored colour map, use:
+Add your own choices **after** the managed PDE loader block. Do not edit inside its markers:
 
 ```powershell
-foreach ($name in 'cls','cld','Get-Verb','Get-PDEStatus') {
-    $map = Get-PDECommandNameColorMap -Name $name
-    $labels = foreach ($value in $map) {
-        switch ([int]$value) {
-            0 { 'N' }
-            1 { 'Y' }
-            2 { 'R' }
-            3 { 'G' }
-        }
-    }
-    [pscustomobject]@{
-        Command = $name
-        Characters = $name.ToCharArray() -join ' '
-        ColourMap = $labels -join ' '
-    }
-} | Format-Table -AutoSize
-```
+# My PDE preferences
+Set-PDEOptions -FuzzyMaximumDistance 2 -CommandRefreshSeconds 300 | Out-Null
 
-In Windows PowerShell 5.1, if piping a `foreach` statement causes an empty-pipeline parse error, assign the loop output to `$results` first and then run `$results | Format-Table -AutoSize`.
-
-Expected examples depend on the current index:
-
-- `cls` should be green if `cls` is indexed as a history command.
-- `cld` should align to `cls` when that is selected as the best candidate; expected `G G R` when `cls` is used.
-- A known unused command such as `Get-Verb` should be yellow if it has not appeared in the indexed history.
-- A previously indexed command such as `Get-PDEStatus` should be green.
-
-## 12.3 Keyboard and terminal tests
-
-Manually test all of the following in the actual terminal used for development:
-
-- Type command names one character at a time and confirm per-character colours.
-- Move the cursor left and right and check cursor position and display stability.
-- Backspace and Delete.
-- Tab and Shift+Tab completion.
-- Ctrl+W, Ctrl+Backspace, Alt+Backspace and Ctrl+Delete.
-- UpArrow and DownArrow under InlineView and ListView.
-- Ctrl+RightArrow with an available inline prediction.
-- Single-line Ctrl+V.
-- Multi-line Ctrl+V.
-- Shift+Insert.
-- A long line that approaches the console width; it should be left to PSReadLine rather than manually repainted if wrapping would occur.
-- Non-ASCII input; it should be left to PSReadLine.
-
-## 12.4 Validation record and evidence boundary
-
-A previous build was tested in Windows PowerShell 5.1.26100.9818 with PSReadLine 2.4.5. The user reported six of six built-in tests passing, nineteen of nineteen additional automated checks passing, and character-map results including `cls = G G G` and `cld = G G R` for the earlier character-level implementation.
-
-Those results are historical evidence for the earlier implementation. They must **not** be presented as proof that the later C#-optimised four-file replacement set has been installed or passed runtime testing. After installing the optimised files, rerun `Test-PDE`, the character-map checks, and the physical keyboard tests, then update this section with the actual new results.
-
-# 13. Installation and maintenance
-
-## 13.1 Profile bootstrap
-
-The user's current profile bootstrap follows this pattern:
-
-```powershell
-# PowerShell Developer Environment V2 - Profile Loader
-$PdeProfilePath = Join-Path $HOME 'PDE-V2.ps1'
-
-if (Test-Path -LiteralPath $PdeProfilePath -PathType Leaf) {
-    . $PdeProfilePath
-} else {
-    Write-Warning "PDE V2 profile not found: $PdeProfilePath"
+if ((Get-PDEStatus).LiveHighlightingEnabled) {
+    Set-PDELivePSReadLineOption -PredictionSource History
 }
 ```
 
-The main `PDE-V2.ps1` loader then dot-sources the nine feature scripts.
+The Windows PowerShell and PowerShell 7 profile paths are separate. Apply preferences to the editions you use. If setup has not created a profile yet, run installation first.
 
-## 13.2 Module directory
+## Keyboard controls and custom shortcuts
 
-In the current installation, the feature files are located in:
+Bindings depend on the editor's edit mode and your configuration. Typical controls include Enter to submit, Ctrl+C to cancel, arrows to move, Home/End to navigate a line, Backspace/Delete to remove characters, Tab/Shift+Tab for completion, and Shift+Enter for multiline input.
 
-```text
-<directory containing $PROFILE>\Modules\
-```
-
-The corresponding loader expression is:
+Inspect the active live-editor bindings:
 
 ```powershell
-$PDE_ModuleDirectory = Join-Path (Split-Path -Parent $PROFILE) 'Modules'
+Get-PDELivePSReadLineKeyHandler -Bound
+Get-PDELivePSReadLineOption
 ```
 
-The packaged standalone loader uses `$PSScriptRoot\Modules` instead. Do not mix these path conventions without checking the actual folder layout.
-
-## 13.3 Required files
-
-The expected runtime module directory contains all nine files:
-
-```text
-PDE-AST-Analysis.ps1
-PDE-Command-Index.ps1
-PDE-Fuzzy-Suggestions.ps1
-PDE-History-Index.ps1
-PDE-Live-Highlighting.ps1
-PDE-Logging.ps1
-PDE-Management-Diagnostics.ps1
-PDE-Prompt-History.ps1
-PDE-PSReadLine-Integration.ps1
-```
-
-For the C#-optimised character-highlighting refactor, replace these four existing files:
-
-1. `PDE-Live-Highlighting.ps1`
-2. `PDE-History-Index.ps1`
-3. `PDE-Logging.ps1`
-4. `PDE-Management-Diagnostics.ps1` (compatibility update for the removed highlighter functions)
-
-The other five feature files remain in place. Do not add duplicate copies or rename the files expected by the loader.
-
-## 13.4 Unblocking downloaded files
-
-When downloaded `.ps1` files are blocked by Windows under `RemoteSigned`, unblock only the trusted PDE files after checking their source:
+Named native bindings are copied where supported. Custom native script handlers remain attached to the native editor and are not safely transferable through its public enumeration API. Register live handlers explicitly:
 
 ```powershell
-$modules = Join-Path (Split-Path -Parent $PROFILE) 'Modules'
-Get-ChildItem -LiteralPath $modules -Filter 'PDE-*.ps1' -File | Unblock-File
+Set-PDELivePSReadLineKeyHandler -Chord F8 -ScriptBlock {
+    [PDE.PowerShell.PSConsoleReadLine]::Insert('CUSTOM')
+}
 ```
 
-Do not change the machine or user execution policy to `Unrestricted` or `Bypass` just to load the PDE files. Unblocking removes the downloaded-file mark; it does not validate the script's contents.
-
-## 13.5 First-start validation
-
-After opening a fresh PowerShell session, run:
+Remove that live binding:
 
 ```powershell
-Get-PDEStatus | Format-List
+Remove-PDELivePSReadLineKeyHandler -Chord F8
+```
+
+Removing a binding does not recreate a previous one. Use the appropriate `-Function` binding to restore a known function or start a fresh process.
+
+**Use the matching editor API:** live handlers call `[PDE.PowerShell.PSConsoleReadLine]`; native handlers call `[Microsoft.PowerShell.PSConsoleReadLine]`. Calling the native API from a live handler edits the wrong buffer.
+
+`Disable-PDELiveHighlight` returns to the native reader and its native settings/bindings. Enable live mode after any profile framework that replaces `PSConsoleHostReadLine`; a later replacement can otherwise take over the reader.
+
+## Testing
+
+### Dedicated colour tests
+
+From the extracted folder, run `pwsh.exe -NoProfile -File .\Test-PDE.ps1 -Coloring`. For Windows PowerShell 5.1 use `powershell.exe` in place of `pwsh.exe`. This runs the PowerShell colour-map checks in a fresh process, including swapped letters, duplicate letters and quoted commands.
+
+### Automated tests
+
+Run from the complete extracted release folder, in disposable processes:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -File .\Test-PDE.ps1
+pwsh.exe -NoLogo -NoProfile -File .\Test-PDE.ps1
+```
+
+Use only the engines actually installed. Save individual reports:
+
+```powershell
+powershell.exe -NoProfile -File .\Test-PDE.ps1 -ReportPath .\results-5.1.json
+pwsh.exe -NoProfile -File .\Test-PDE.ps1 -ReportPath .\results-7.json
+```
+
+The test script exits with `0` when its executable checks pass and `1` on failure. Check `$LASTEXITCODE` immediately afterward. A zero exit code does not turn SKIP into PASS or certify production readiness.
+
+From a running PDE session, the wrapper launches a child test process:
+
+```powershell
 Test-PDE
-Get-PDEStatistics | Format-List
-Get-PDEDiagnostics | Format-List
+$result = Test-PDE -Quiet
+$result | Select-Object Passed, PassedCount, FailedCount, SkippedCount, ProductionReady
+$result.Checks | Where-Object Status -eq 'FAIL'
 ```
 
-For the refactored C# helper, check:
+Do not dot-source the standalone test scripts into your everyday session; they intentionally exercise temporary configuration and process exit paths.
+
+Tests cover command maps/classification, parsing, discovery, suggestions, history privacy, lifecycle, live backend loading/restoration, and sandbox install/upgrade/uninstall/rollback. Automated setup checks use temporary profile paths, not your real profile.
+
+### Guided terminal tests
+
+Run each installed edition in a disposable console:
 
 ```powershell
-[bool]('PDE.LevenshteinHelper' -as [type])
-$global:PDE_State.LevenshteinHelperReady
+powershell.exe -NoProfile -File .\Test-PDE.ps1 -Interactive -ReportPath .\terminal-5.1.json
+pwsh.exe -NoProfile -File .\Test-PDE.ps1 -Interactive -ReportPath .\terminal-7.json
 ```
 
-If the C# helper has changed since it was first added to the process, close and reopen PowerShell before reloading the updated file.
+The guide returns typed test text as data, compares buffers and asks about visible behaviour. Its history saving is suppressed. It disables prompt learning while you exercise the editor.
 
-## 13.6 Safe update procedure
+Manually check:
 
-1. Back up the four files being replaced.
-2. Copy the replacement files into the existing `Modules` directory using the exact filenames.
-3. Unblock only those downloaded PDE files after verifying them.
-4. Restart PowerShell if the compiled C# helper has changed.
-5. Reload the profile.
-6. Run `Get-PDEStatus` and `Test-PDE`.
-7. Run the character-map checks.
-8. Complete physical keyboard, cursor and clipboard tests.
-9. Keep backups until the refactor has passed in the intended terminal.
+1. Exact, swapped and incorrect letters using the quick-start example. Check the gray suffix separately when an inline suggestion appears.
+2. Red-to-orange/green transitions while correcting a name.
+3. Rapid typing, cursor movement, Backspace/Delete and selection.
+4. Copy/paste, Unicode, long wrapped lines and multiline input.
+5. Up/Down history, Tab completion, custom shortcuts and resizing.
+6. Repeated live-mode enable/disable and native reader restoration.
+7. Custom prompt frameworks and background/asynchronous output used in your environment.
 
-# Appendix A. Quick reference
+Some guided checks require explicit `y/n/s` observer answers. `s` means unverified.
 
-| Task | Command |
+## Troubleshooting
+
+| Symptom | Check / action |
 |---|---|
-| Show PDE status | `Get-PDEStatus \| Format-List` |
-| Run built-in tests | `Test-PDE` |
-| Show statistics | `Get-PDEStatistics \| Format-List` |
-| Show environment diagnostics | `Get-PDEDiagnostics \| Format-List` |
-| Force command-index refresh | `Update-PDEIndex -Force` |
-| Refresh history index | `Update-PDEHistory` |
-| Recognise a command | `Test-PDECommandName -Name 'Get-Date'` |
-| Analyse a command | `Get-PDECommandAnalysis -Text 'Get-Date \| Where-Object { $_ }'` |
-| Test syntax | `Test-PDESyntax -Text 'Get-Date \| Where-Object { $_ }'` |
-| Get command suggestions | `Get-PDESuggestions -Prefix 'Get-Da' -Source Command` |
-| Get fuzzy suggestions | `Get-PDESuggestions -Prefix 'Get-Procss' -Source Command -Fuzzy` |
-| Inspect per-character colours | `Get-PDECommandNameColorMap -Name 'cld'` |
-| Inspect a complete line's colour map | `Get-PDELineColorMap -Text 'Get-Date'` |
-| Change prediction view | `Set-PDEOptions -PredictionViewStyle ListView` |
-| Disable predictions | `Set-PDEOptions -EnablePredictions $false` |
-| Enable diagnostics logging | `Set-PDEOptions -EnableDiagnosticsLog $true` |
+| No live colours | Run `Get-PDEStatus`; check `Interactive`, `LiveHighlightingEnabled`, `ColouringStatus`, `LastError` |
+| `Get-PDEStatus` is not recognised | Profile did not load PDE, wrong edition/host profile, or a profile error occurred; dot-source `PDE.ps1` from the extracted folder to isolate it |
+| Earlier version still appears | Close all old consoles and open a fresh one; loaded DLLs cannot be replaced in an existing process |
+| `PowerShell 7 not found` | Windows PowerShell can still work; if 7 is installed elsewhere, set `PDE_PWSH_PATH` and rerun setup |
+| PowerShell 7.0–7.3 detected | This Core binary requires 7.4+; use Windows PowerShell 5.1 or a compatible installed Core version |
+| DLL/script blocked | Read installer trust prompts and policy errors; trust/unblock only files you reviewed; organization policy remains authoritative |
+| Valid command is red | Run `Update-PDEIndex -Force` after installing tools/importing modules; inspect `DiscoveryHealthy` |
+| Exact letters do not turn green | Check that `ColouringStatus` reports character highlighting. After an upgrade, open a fresh PowerShell process and check again. |
+| A different command is chosen | Use `Get-PDESuggestions` to inspect nearby names and `Update-PDEIndex -Force` to refresh the command index. |
 
----
+| Old commands remain after Clear-PDEHistory | That clears PDE’s learned command names; clear PowerShell/editor memory or files separately |
+| Predictions do not change | Configure the active live editor with `Set-PDELivePSReadLineOption`; PDE's general prediction option addresses the native editor |
+| Custom shortcut does nothing | Register it with `Set-PDELivePSReadLineKeyHandler` and the PDE editor type |
+| Prompt framework takes over the reader | Call `Enable-PDELiveHighlight` after its setup; disable PDE learning if its status capture conflicts |
+| Overlap or cursor problems | `Disable-PDELiveHighlight`, then use a fresh console; record engine/terminal/version and diagnostics for investigation |
 
-**End of PDE Command Intelligence 3.1.2 Technical Documentation.**
+Useful diagnostics:
+
+```powershell
+$PSVersionTable
+Get-PDEStatus | Format-List
+Get-PDEDiagnostics | Format-List
+Get-PDELivePSReadLineOption | Format-List
+Get-PDELivePSReadLineKeyHandler -Bound
+Get-ExecutionPolicy -List
+```
+
+Review diagnostic output before sharing it; paths and configuration may be private.
+
+## Upgrading and uninstalling
+
+### Upgrade
+
+1. Close all PDE consoles.
+2. Extract the complete replacement release into one folder.
+3. Run its `Install-PDE.cmd`.
+4. Open a fresh console and check `Get-PDEStatus`.
+5. Run tests appropriate to your engine and terminal.
+
+Backups have unique `.pde.<id>.bak` filenames. Keep them until the new build is verified. Avoid opening terminals during the multi-file upgrade. Unmarked handwritten profile loader lines are not removed automatically; check for duplicate manual imports if an old version still loads.
+
+### Stop PDE in the current session
+
+```powershell
+Stop-PDE
+```
+
+Restart without reinstalling:
+
+```powershell
+Start-PDE
+```
+
+PDE-prefixed functions remain defined after stopping. Stopping restores owned hooks/settings; it does not remove profile startup integration or unload DLLs from the process.
+
+### Remove startup integration
+
+Run `.\Install-PDE.cmd uninstall` from PowerShell in the extracted folder to handle detected editions. For the current host only:
+
+```powershell
+Uninstall-PDE -WhatIf
+Uninstall-PDE
+```
+
+It removes PDE-managed profile blocks and creates profile backups. Installed files, unrelated profile content and backups remain. It does not revert a user-approved execution-policy change or erase personal history. After closing all PDE processes, you may manually remove the dedicated installation folder if you no longer need it.
+
+## Project files
+
+### Where to edit the colouring system
+
+**Start with `PDE.CharacterColoring.cs`.** Open `ComparePositions(typed, target)` to change the green, orange and red rules. The first loop reserves exact matches. The second loop visits the remaining typed letters and assigns orange while a matching target letter is available. Open `Map` to change how PDE chooses the target or treats known prefixes.
+
+| To change | Edit |
+|---|---|
+| Which letters count as correct, misplaced or incorrect | `PDE.CharacterColoring.cs` → `ComparePositions` |
+| Which command a typo is compared with | `PDE.CharacterColoring.cs` → `Map` |
+| Standalone preview colours or display | `PDE.ps1` → `Show-PDEHighlight` |
+| Live colour shades or where command letters are painted | Inside `PDE.Editor.Source.zip`, open `PDE.CommandColors.cs` → `Palette` or `Prepare` |
+| Gray inline prediction shade | Inside the same archive, open `Prediction.Views.cs` and search for `\x1b[90m` |
+
+**Test a rule change** with the dedicated colour tests above. To use the change while typing, extract the editor source and copy your edited `PDE.CharacterColoring.cs` over its copy. Follow `BUILD-NOTES.txt` inside that archive to configure the build dependencies and build `Core.csproj` and `Desktop.csproj` separately. Package the Core build’s `PDE.Editor.dll` as `PDE.Editor.Core.dll` and the Desktop build as `PDE.Editor.Desktop.dll`. Refresh the source archive and release checksums when redistributing. Close existing consoles, reinstall and open a new console to load the rebuilt editor.
+
+### Release contents
+
+| File | Responsibility |
+|---|---|
+| `PDE.ps1` | PowerShell entry point. Named regions contain startup, command discovery, history, suggestions, analysis, colouring, live-editor integration, diagnostics, tests and installation. |
+| `PDE.CharacterColoring.cs` | Shared per-character matching and target-selection rules. |
+| `PDE.Editor.Core.dll` | Live editor for PowerShell 7.4 and later. |
+| `PDE.Editor.Desktop.dll` | Live editor for Windows PowerShell 5.1. |
+| `Microsoft.PowerShell.Pager.dll` | Editor help dependency. |
+| `System.Runtime.InteropServices.RuntimeInformation.dll` | Desktop runtime dependency. |
+| `PDE.Editor.Source.zip` | Editor source, both project files and build notes. |
+| `Install-PDE.cmd` | Windows launcher for setup and removal. |
+| `Setup-PDE.ps1` | Runs setup for the requested PowerShell editions. |
+| `Test-PDE.ps1` | Automated suite, dedicated colour tests and guided interactive checks. |
+| `README.md` | This guide. |
+| `SHA256SUMS.txt` | SHA-256 hashes for the other release files. |
+| `LICENSE` | Project licence and bundled third-party notices. |
+
+## Known limitations and privacy
+
+- Success learning observes PowerShell's reported outcome, not application-level correctness. A function can mask internal failures.
+- PDE success history is bounded, names-only and session-only. PDE does not import or repair your personal history files.
+- Editor history can still save full commands according to its settings. Secret-pattern filtering for PDE learning does not guarantee removal from native/live history, transcripts or other logs.
+- The native and live editors have separate settings and memory; configure and clear both when appropriate.
+- Custom native script key bindings require explicit live registration.
+- Prompt learning calls the original prompt once, but arbitrary `$?`-dependent prompt code may need `$global:PDE_LastCommandSucceeded`. `$global:PDE_LastNativeExitCode` contains the captured native exit code.
+- Custom history acceptance handlers are called again for learning eligibility. Disable PDE learning if such a handler has side effects.
+- Unsupported hosts and load failures fall back to native editing with diagnostic status. Some profiles can subsequently replace the host reader.
+- Windows compatibility and terminal behaviour require local verification. Do not interpret passing map tests or compiled DLLs as Windows visual certification.
+
+The modified editor is derived from Microsoft PowerShell PSReadLine 2.3.6 under its MIT license. PDE's supplied license and third-party notices remain part of the release.
